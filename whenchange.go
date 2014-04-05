@@ -10,12 +10,12 @@
 // 
 // Usage
 //
-//     whenchange *.go go build
+//     whenchange -p source.go go build
 //
 // The above command will monitor all go files in the current
 // directory for changes, and trigger go build.
 //
-//     whenchange ./src/ mvn test-compile
+//     whenchange -p ./src/ mvn test-compile
 //
 // The above command will monitor recursivelly the src folder,
 // and execute the maven test compile target.
