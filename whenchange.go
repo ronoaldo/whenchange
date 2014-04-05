@@ -5,7 +5,7 @@
 //
 // Installation
 //
-//     go get ronoaldo.goimport.net/whenchange
+//     go get ronoaldo.gopkg.net/whenchange
 // 
 // 
 // Usage
