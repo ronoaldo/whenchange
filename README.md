@@ -5,7 +5,7 @@ watching sub-directories, and when a change happens, executes a command.
 
 ### Installation
 
-    go get ronoaldo.goimport.net/whenchange
+    go get ronoaldo.gopkg.net/whenchange
 
 ### Usage
 
