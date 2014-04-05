@@ -1,5 +1,7 @@
 # whenchange
---
+
+[![GoDoc](https://godoc.org/ronoaldo.gopkg.net/whenchange?status.png)](https://godoc.org/ronoaldo.gopkg.net/whenchange)
+
 Command whenchange monitors for changes on files, directories, and optionally
 watching sub-directories, and when a change happens, executes a command.
 
