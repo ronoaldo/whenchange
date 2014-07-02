@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 var (
@@ -36,12 +37,16 @@ var (
 	pathList PathList
 	// Watch directory recursively
 	recursive bool
+	// If we should print the output of executed command
+	printOut bool
 	// Command to execute on changes
 	cmd []string
 	// Debug options
 	debug bool
 	// fsnotify.Watcher to monitor changes
 	watcher *fsnotify.Watcher
+	// Shell to use when running the command
+	shell string
 )
 
 // Type PathList represents a set of paths to watch for.
@@ -63,12 +68,23 @@ func init() {
 	flag.BoolVar(&recursive, "r", true, "Watch directories recursively (shorthand)")
 	flag.BoolVar(&debug, "d", false, "Output debug information")
 	flag.Var(&pathList, "p", "Files and directories to watch")
+	flag.BoolVar(&printOut, "out", true, "Print output of executed command")
+	flag.StringVar(&shell, "shell", "bash", "The shell to use when running the command")
+	flag.Usage = func() {
+		w := os.Stderr
+		fmt.Fprintf(w, "whenchange - run shell command when files change\n")
+		fmt.Fprintf(w, "Usage: whenchange [-d] [-r|--recursive] "+
+			"[-out] [-p path [-p path]...] command\n")
+		fmt.Fprintf(w, "All positional arguments will compose the resulting command to execute")
+		flag.PrintDefaults()
+	}
 }
 
 func main() {
 	// Parse and print help
 	flag.Parse()
 	cmd = flag.Args()
+	Debugf("Command to execute: %v", cmd)
 
 	var err error
 	watcher, err = fsnotify.NewWatcher()
@@ -81,7 +97,10 @@ func main() {
 		pathList.Set("./")
 	}
 
+	Debugf("Path list %v", pathList)
+
 	for _, f := range pathList {
+		Watch(f)
 		for _, s := range SubDirs(f) {
 			Watch(s)
 		}
@@ -101,15 +120,10 @@ func main() {
 // and keep monitoring for new folders when added.
 func HandleEvent(ev *fsnotify.FileEvent) {
 	path := filepath.Clean(ev.Name)
-	Debugf("%s changed\n", path)
+	Debugf("%s changed (%s)", path, ev)
 
 	if ev.IsCreate() {
-		s, err := os.Stat(path)
-		if err != nil {
-			Debugf("Error: %s: %s", path, err.Error())
-			return
-		}
-		if s.IsDir() {
+		if IsDir(path) {
 			Debugf("Monitoring %s", path)
 			watcher.Watch(path)
 		}
@@ -117,13 +131,23 @@ func HandleEvent(ev *fsnotify.FileEvent) {
 
 	// Run command
 	if len(cmd) > 0 {
-		out, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput()
+		out, err := exec.Command(shell, "-c", strings.Join(cmd, " ")).CombinedOutput()
 		if err != nil {
-			Debugf("Error running command [%s]:\n%s", cmd, err)
-			return
+			log.Printf("Error running command %s: %s", cmd, err)
 		}
-		Debugf(string(out))
+		if printOut && len(out) > 0 {
+			log.Printf("Command output:\n%s\n", string(out))
+		}
 	}
+}
+
+func IsDir(path string) bool {
+	s, err := os.Stat(path)
+	if err != nil {
+		log.Printf("Unable to stat %s: %v", path, err)
+		return false
+	}
+	return s.IsDir()
 }
 
 // Handle any errors when they happend.
