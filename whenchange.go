@@ -30,6 +30,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 var (
@@ -37,16 +39,17 @@ var (
 	pathList PathList
 	// Watch directory recursively
 	recursive bool
-	// If we should print the output of executed command
-	printOut bool
 	// Command to execute on changes
 	cmd []string
-	// Debug options
-	debug bool
+	// verbose options
+	verbose bool
 	// fsnotify.Watcher to monitor changes
-	watcher *fsnotify.Watcher
+	watcher *Watcher
 	// Shell to use when running the command
 	shell string
+	// Delay between repeated executions of command
+	delaySpec string
+	delay     time.Duration
 )
 
 // Type PathList represents a set of paths to watch for.
@@ -63,19 +66,44 @@ func (p *PathList) Set(value string) error {
 	return nil
 }
 
+type Watcher struct {
+	*fsnotify.Watcher
+	list   map[string]time.Time
+	listMu sync.Mutex
+}
+
+func (w *Watcher) Watch(path string) {
+	w.listMu.Lock()
+	defer w.listMu.Unlock()
+	if _, ok := w.list[path]; ok {
+		verbosef("Path %s already in watch list", path)
+		return
+	}
+	verbosef("Watching [%s]", path)
+	err := w.Watcher.Watch(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// To prevent ignoring the very first change, use a time machine and
+	// go back in time :D
+	w.list[path] = time.Now().Add(-5 * time.Second)
+}
+
 func init() {
+	flag.StringVar(&delaySpec, "delay", "5s", "Delay between repeated executions of command")
+	flag.StringVar(&delaySpec, "d", "5s", "Delay between repeated executions of command (shorthand)")
 	flag.BoolVar(&recursive, "recursive", true, "Watch directories recursively")
 	flag.BoolVar(&recursive, "r", true, "Watch directories recursively (shorthand)")
-	flag.BoolVar(&debug, "d", false, "Output debug information")
-	flag.Var(&pathList, "p", "Files and directories to watch")
-	flag.BoolVar(&printOut, "out", true, "Print output of executed command")
+	flag.BoolVar(&verbose, "verbose", false, "Output verbose information")
+	flag.BoolVar(&verbose, "v", false, "Output verbose information (shorthand)")
+	flag.Var(&pathList, "path", "Files and directories to watch")
+	flag.Var(&pathList, "p", "Files and directories to watch (shorthand)")
 	flag.StringVar(&shell, "shell", "bash", "The shell to use when running the command")
 	flag.Usage = func() {
 		w := os.Stderr
-		fmt.Fprintf(w, "whenchange - run shell command when files change\n")
-		fmt.Fprintf(w, "Usage: whenchange [-d] [-r|--recursive] "+
-			"[-out] [-p path [-p path]...] command\n")
-		fmt.Fprintf(w, "All positional arguments will compose the resulting command to execute")
+		fmt.Fprintf(w, "Usage: whenchange [options] commands\n")
+		fmt.Fprintf(w, "All positional arguments will compose the resulting command to execute\n")
+		fmt.Fprintf(w, "Options can be:\n")
 		flag.PrintDefaults()
 	}
 }
@@ -84,25 +112,32 @@ func main() {
 	// Parse and print help
 	flag.Parse()
 	cmd = flag.Args()
-	Debugf("Command to execute: %v", cmd)
+	verbosef("Command to execute: %v", cmd)
 
 	var err error
-	watcher, err = fsnotify.NewWatcher()
+	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatal(err)
 	}
+	watcher = &Watcher{Watcher: fsw, list: make(map[string]time.Time)}
 	defer watcher.Close()
 
 	if len(pathList) < 1 {
 		pathList.Set("./")
 	}
 
-	Debugf("Path list %v", pathList)
+	delay, err = time.ParseDuration(delaySpec)
+	if err != nil {
+		log.Printf("Invalid duration: %s. Using 5s instead", delaySpec)
+		delay = 5 * time.Second
+	}
+
+	verbosef("Path list %v", pathList)
 
 	for _, f := range pathList {
-		Watch(f)
+		watcher.Watch(f)
 		for _, s := range SubDirs(f) {
-			Watch(s)
+			watcher.Watch(s)
 		}
 	}
 
@@ -120,24 +155,41 @@ func main() {
 // and keep monitoring for new folders when added.
 func HandleEvent(ev *fsnotify.FileEvent) {
 	path := filepath.Clean(ev.Name)
-	Debugf("%s changed (%s)", path, ev)
-
+	verbosef("%s changed (%s)", path, ev)
 	if ev.IsCreate() {
 		if IsDir(path) {
-			Debugf("Monitoring %s", path)
+			verbosef("Monitoring %s", path)
 			watcher.Watch(path)
 		}
 	}
-
+	if ev.IsDelete() {
+		// TODO: Handle directory removal -- do we need to ignore children?
+		verbosef("Stopping watching for %s", path)
+		watcher.RemoveWatch(path)
+	}
+	// Locking, because we will change the path map
+	watcher.listMu.Lock()
+	defer watcher.listMu.Unlock()
+	now := time.Now()
+	if now.Sub(watcher.list[path]) < delay {
+		verbosef("File %s changed too fast. Ignoring this change.", path)
+		return
+	}
+	watcher.list[path] = now
 	// Run command
 	if len(cmd) > 0 {
-		out, err := exec.Command(shell, "-c", strings.Join(cmd, " ")).CombinedOutput()
+		c := strings.Join(cmd, " ")
+		log.Printf("Running command '%s' ...", c)
+		cmd := exec.Command(shell, "-c", c)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err := cmd.Run()
 		if err != nil {
-			log.Printf("Error running command %s: %s", cmd, err)
+			log.Printf("Error: %s", err)
 		}
-		if printOut && len(out) > 0 {
-			log.Printf("Command output:\n%s\n", string(out))
-		}
+		log.Printf("Done.")
+	} else {
+		log.Printf("No command to run.")
 	}
 }
 
@@ -155,15 +207,6 @@ func HandleError(err error) {
 	log.Printf(err.Error())
 }
 
-// Watch watches and logs if any error happens.
-func Watch(f string) {
-	Debugf("Watching [%s]", f)
-	err := watcher.Watch(f)
-	if err != nil {
-		log.Fatal(err)
-	}
-}
-
 // Given a file path, all sub directories are returned.
 func SubDirs(path string) []string {
 	var paths []string
@@ -171,18 +214,16 @@ func SubDirs(path string) []string {
 		if err != nil {
 			return err
 		}
-
 		if info.IsDir() {
 			paths = append(paths, newPath)
 		}
-
 		return nil
 	})
 	return paths
 }
 
-func Debugf(f string, args ...interface{}) {
-	if debug {
+func verbosef(f string, args ...interface{}) {
+	if verbose {
 		log.Printf(f, args...)
 	}
 }
