@@ -22,7 +22,6 @@
 package main
 
 import (
-	"code.google.com/p/go.exp/fsnotify"
 	"flag"
 	"fmt"
 	"log"
@@ -32,6 +31,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/fsnotify.v0"
 )
 
 var (
