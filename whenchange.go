@@ -136,9 +136,13 @@ func main() {
 	verbosef("Path list %v", pathList)
 
 	for _, f := range pathList {
-		watcher.Watch(f)
-		for _, s := range SubDirs(f) {
-			watcher.Watch(s)
+		if glob, err := filepath.Glob(f); err == nil {
+			for _, fname := range glob {
+				watcher.Watch(fname)
+				for _, s := range SubDirs(fname) {
+					watcher.Watch(s)
+				}
+			}
 		}
 	}
 
