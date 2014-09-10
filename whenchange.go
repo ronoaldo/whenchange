@@ -27,6 +27,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -37,7 +38,7 @@ import (
 
 var (
 	// List of paths to watch
-	pathList PathList
+	patternList Patterns
 	// Watch directory recursively
 	recursive bool
 	// Command to execute on changes
@@ -53,16 +54,16 @@ var (
 	delay     time.Duration
 )
 
-// Type PathList represents a set of paths to watch for.
-type PathList []string
+// Type Patterns represents a set of paths to watch for.
+type Patterns []string
 
 // Method String implements the flags.Value interface.
-func (p *PathList) String() string {
+func (p *Patterns) String() string {
 	return fmt.Sprint(*p)
 }
 
 // Method Set implements the flags.Value interface.
-func (p *PathList) Set(value string) error {
+func (p *Patterns) Set(value string) error {
 	*p = append(*p, value)
 	return nil
 }
@@ -73,30 +74,46 @@ type Watcher struct {
 	listMu sync.Mutex
 }
 
-func (w *Watcher) Watch(path string) {
+// Watch starts monitoring a file path. It also monitors the
+// directory for changes, so attribute changes are also visible.
+func (w *Watcher) Watch(file string) {
 	w.listMu.Lock()
 	defer w.listMu.Unlock()
-	if _, ok := w.list[path]; ok {
-		verbosef("Path %s already in watch list", path)
-		return
+
+	towatch := []string{file}
+	// Also monitors the directory, if file, so attrib changes
+	// and timestamp changes are visible as well.
+	if !IsDir(file) {
+		towatch = append(towatch, path.Dir(file))
 	}
-	verbosef("Watching [%s]", path)
-	err := w.Watcher.Watch(path)
-	if err != nil {
-		log.Fatal(err)
+
+	for _, file := range towatch {
+		if _, ok := w.list[file]; ok {
+			verbosef("Path %s already in watch list", file)
+			return
+		}
+		verbosef("Watching [%s]", file)
+		err := w.Watcher.Watch(file)
+		if err != nil {
+			log.Fatal(err)
+		}
+		// To prevent ignoring the very first change, use a time machine and
+		// go back in time :D
+		w.list[file] = time.Now().Add(-5 * time.Second)
 	}
-	// To prevent ignoring the very first change, use a time machine and
-	// go back in time :D
-	w.list[path] = time.Now().Add(-5 * time.Second)
 }
 
-func (w *Watcher) WatchAll(paths []string) {
-	for _, f := range paths {
-		if glob, err := filepath.Glob(f); err == nil {
+// WatchPatterns lookup all gob matches from patterns and watch them.
+// If -r/--recursive is true, walks all sub-trees recursivelly.
+func (w *Watcher) WatchPatterns(patterns []string) {
+	for _, p := range patterns {
+		if glob, err := filepath.Glob(p); err == nil {
 			for _, fname := range glob {
 				watcher.Watch(fname)
-				for _, s := range SubDirs(fname) {
-					watcher.Watch(s)
+				if recursive {
+					for _, s := range SubDirs(fname) {
+						watcher.Watch(s)
+					}
 				}
 			}
 		}
@@ -110,8 +127,8 @@ func init() {
 	flag.BoolVar(&recursive, "r", true, "Watch directories recursively (shorthand)")
 	flag.BoolVar(&verbose, "verbose", false, "Output verbose information")
 	flag.BoolVar(&verbose, "v", false, "Output verbose information (shorthand)")
-	flag.Var(&pathList, "path", "Files and directories to watch")
-	flag.Var(&pathList, "p", "Files and directories to watch (shorthand)")
+	flag.Var(&patternList, "pattners", "Files and directories to watch, as a gob pattern")
+	flag.Var(&patternList, "p", "Files and directories to watch, as a gob pattern (shorthand)")
 	flag.StringVar(&shell, "shell", "bash", "The shell to use when running the command")
 	flag.Usage = func() {
 		w := os.Stderr
@@ -136,8 +153,8 @@ func main() {
 	watcher = &Watcher{Watcher: fsw, list: make(map[string]time.Time)}
 	defer watcher.Close()
 
-	if len(pathList) < 1 {
-		pathList.Set("./")
+	if len(patternList) < 1 {
+		patternList.Set("./")
 	}
 
 	delay, err = time.ParseDuration(delaySpec)
@@ -146,8 +163,8 @@ func main() {
 		delay = 5 * time.Second
 	}
 
-	verbosef("Path list %v", pathList)
-	watcher.WatchAll(pathList)
+	verbosef("Path list %v", patternList)
+	watcher.WatchPatterns(patternList)
 
 	for {
 		select {
@@ -163,21 +180,26 @@ func main() {
 // and keep monitoring for new folders when added.
 func HandleEvent(ev *fsnotify.FileEvent) {
 	path := filepath.Clean(ev.Name)
-	verbosef("%s changed (%s)", path, ev)
 	if ev.IsCreate() {
-		if IsDir(path) {
-			verbosef("Monitoring %s", path)
-			watcher.Watch(path)
-		}
+		// New file added, check if it matches the patterns
+		watcher.WatchPatterns(patternList)
+		return
 	}
 	// Locking, because we will change the path map
 	watcher.listMu.Lock()
 	defer watcher.listMu.Unlock()
+
 	now := time.Now()
-	if now.Sub(watcher.list[path]) < delay {
+	wtime, watching := watcher.list[path]
+	if !watching {
+		return
+	}
+	if now.Sub(wtime) < delay {
 		verbosef("File %s changed too fast. Ignoring this change.", path)
 		return
 	}
+
+	verbosef("%s changed (%s)", path, ev)
 	watcher.list[path] = now
 	// Run command
 	if len(cmd) > 0 {
