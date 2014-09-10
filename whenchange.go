@@ -90,6 +90,19 @@ func (w *Watcher) Watch(path string) {
 	w.list[path] = time.Now().Add(-5 * time.Second)
 }
 
+func (w *Watcher) WatchAll(paths []string) {
+	for _, f := range paths {
+		if glob, err := filepath.Glob(f); err == nil {
+			for _, fname := range glob {
+				watcher.Watch(fname)
+				for _, s := range SubDirs(fname) {
+					watcher.Watch(s)
+				}
+			}
+		}
+	}
+}
+
 func init() {
 	flag.StringVar(&delaySpec, "delay", "5s", "Delay between repeated executions of command")
 	flag.StringVar(&delaySpec, "d", "5s", "Delay between repeated executions of command (shorthand)")
@@ -134,17 +147,7 @@ func main() {
 	}
 
 	verbosef("Path list %v", pathList)
-
-	for _, f := range pathList {
-		if glob, err := filepath.Glob(f); err == nil {
-			for _, fname := range glob {
-				watcher.Watch(fname)
-				for _, s := range SubDirs(fname) {
-					watcher.Watch(s)
-				}
-			}
-		}
-	}
+	watcher.WatchAll(pathList)
 
 	for {
 		select {
@@ -166,11 +169,6 @@ func HandleEvent(ev *fsnotify.FileEvent) {
 			verbosef("Monitoring %s", path)
 			watcher.Watch(path)
 		}
-	}
-	if ev.IsDelete() {
-		// TODO: Handle directory removal -- do we need to ignore children?
-		verbosef("Stopping watching for %s", path)
-		watcher.RemoveWatch(path)
 	}
 	// Locking, because we will change the path map
 	watcher.listMu.Lock()
