@@ -19,7 +19,8 @@
 //
 // The above command will monitor recursivelly the src folder,
 // and execute the maven test compile target.
-package main
+
+package main // import "ronoaldo.gopkg.net/whenchange"
 
 import (
 	"flag"
